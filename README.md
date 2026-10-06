@@ -11,6 +11,10 @@ Next.js App Router backoffice for Supabase-authenticated team members. The Repor
 5. Share the configured Google Drive folder with the service-account email and place report CSVs there.
 6. Start the app with `npm run dev`.
 
+## User profile settings
+
+Profile name, phone, and address are saved to the authenticated Supabase user's metadata. Profile pictures are stored privately in the `profile-avatars` Supabase Storage bucket and are scoped to each user's UUID. The Prisma migration creates the bucket and authenticated-user Storage policies; apply it with the migration command above before using profile-picture uploads.
+
 ## Google Drive reports
 
 The server-side **Sync Google Drive** action reads `.csv` files from `GOOGLE_DRIVE_FOLDER_ID`. Names containing `Payment Received` or `Payments Received` are treated as payment reports. Other reports may contain `H&H` or `HH`, `Harbor` or `Harbour`, or `Orlando` in the filename. Already processed files are skipped; after database upserts, the Drive filename is suffixed with `_processed.csv`.
