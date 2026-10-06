@@ -21,6 +21,7 @@ import { ArrowDown, ArrowDownUp, ArrowUp, Check, ChevronDown, ChevronUp, Columns
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { ComponentType } from "react";
+import { useRouter } from "next/navigation";
 import { BookingRow } from "@/components/bookings/booking-row";
 import { PaymentRow } from "@/components/payments/payment-row";
 import { ReportTableRow } from "@/components/reports/report-table-row";
@@ -51,6 +52,9 @@ type ReportTableProps<TData extends object> = {
   pageCount: number;
   pageParam: "bookingPage" | "paymentPage";
   paginationParams: Record<string, string>;
+  activeColumnFilters: Record<string, string[]>;
+  onRowClick?: (row: TData) => void;
+  getRowBookingReference?: (row: TData) => string | null;
 };
 
 export function ReportTable<TData extends object>({
@@ -66,17 +70,39 @@ export function ReportTable<TData extends object>({
   pageCount,
   pageParam,
   paginationParams,
+  activeColumnFilters,
+  onRowClick,
+  getRowBookingReference,
 }: ReportTableProps<TData>) {
-  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  const router = useRouter();
+  const filterPrefix = rowKind === "payment" ? "pf." : "bf.";
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>(
+    Object.entries(activeColumnFilters).map(([id, value]) => ({ id, value })),
+  );
   const [columnVisibility, setColumnVisibility] = useState<ColumnVisibilityState>({});
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [sorting, setSorting] = useState<SortingState>([]);
+  function updateColumnFilters(updater: ColumnFiltersState | ((current: ColumnFiltersState) => ColumnFiltersState)) {
+    const next = typeof updater === "function" ? updater(columnFilters) : updater;
+    setColumnFilters(next);
+    const params = new URLSearchParams(window.location.search);
+    for (const key of [...params.keys()]) {
+      if (key.startsWith(filterPrefix)) params.delete(key);
+    }
+    for (const filter of next) {
+      if (Array.isArray(filter.value) && filter.value.length) {
+        params.set(`${filterPrefix}${filter.id}`, JSON.stringify(filter.value));
+      }
+    }
+    params.set(pageParam, "1");
+    router.replace(`/?${params.toString()}`, { scroll: false });
+  }
   const table = useTable({
     features: reportTableFeatures,
     columns,
     data: rows,
     state: { columnFilters, columnOrder, columnVisibility, sorting },
-    onColumnFiltersChange: setColumnFilters,
+    onColumnFiltersChange: updateColumnFilters,
     onColumnOrderChange: setColumnOrder,
     onColumnVisibilityChange: setColumnVisibility,
     onSortingChange: setSorting,
@@ -153,9 +179,7 @@ export function ReportTable<TData extends object>({
                         </button>
                         <ColumnFilterMenu
                           column={header.column}
-                          values={table
-                            .getCoreRowModel()
-                            .rows.map((row) => String(row.getValue(header.column.id) ?? ""))}
+                          values={table.getCoreRowModel().rows.map((row) => String(row.getValue(header.column.id) ?? ""))}
                         />
                       </div>
                     )}
@@ -171,6 +195,14 @@ export function ReportTable<TData extends object>({
                   key={row.id}
                   rowId={row.id}
                   index={rowIndex}
+                  onClick={getRowBookingReference?.(row.original) && onRowClick
+                    ? () => onRowClick(row.original)
+                    : undefined}
+                  ariaLabel={
+                    getRowBookingReference?.(row.original)
+                      ? `Open booking card for ${getRowBookingReference(row.original)}`
+                      : undefined
+                  }
                   cells={row.getVisibleCells().map((cell) => ({
                     id: cell.id,
                     content: table.FlexRender({ cell }),
@@ -429,19 +461,28 @@ function ColumnFilterMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const initialFilter = column.getFilterValue();
+  const [searchAll, setSearchAll] = useState(
+    Array.isArray(initialFilter)
+      ? (initialFilter.find((value) => typeof value === "string" && value.startsWith("~")) as string | undefined)?.slice(1) ?? ""
+      : "",
+  );
   const uniqueValues = [...new Set(values)].sort((a, b) => a.localeCompare(b));
-  const selected = Array.isArray(column.getFilterValue())
+  const excluded = Array.isArray(column.getFilterValue())
     ? (column.getFilterValue() as string[])
-    : uniqueValues;
+        .filter((value) => value.startsWith("!"))
+        .map((value) => value.slice(1))
+    : [];
+  const selected = uniqueValues.filter((value) => !excluded.includes(value));
   const filteredValues = uniqueValues.filter((value) =>
     value.toLocaleLowerCase().includes(query.toLocaleLowerCase()),
   );
 
   function toggleValue(value: string) {
-    const next = selected.includes(value)
-      ? selected.filter((item) => item !== value)
-      : [...selected, value];
-    column.setFilterValue(next.length ? next : undefined);
+    const nextExcluded = selected.includes(value)
+      ? [...excluded, value]
+      : excluded.filter((item) => item !== value);
+    column.setFilterValue(nextExcluded.length ? nextExcluded.map((item) => `!${item}`) : undefined);
   }
 
   return (
@@ -483,20 +524,37 @@ function ColumnFilterMenu({
                 className="h-8 w-full rounded-lg border border-input bg-background pl-8 pr-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             </div>
+            <form
+              className="mb-2 flex gap-1.5"
+              onSubmit={(event) => {
+                event.preventDefault();
+                column.setFilterValue(searchAll.trim() ? [`~${searchAll.trim()}`] : undefined);
+              }}
+            >
+              <input
+                value={searchAll}
+                onChange={(event) => setSearchAll(event.target.value)}
+                placeholder="Search all records"
+                className="h-8 min-w-0 flex-1 rounded-lg border border-input bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+              <button type="submit" className="rounded-lg bg-primary px-2 text-[11px] font-semibold text-primary-foreground">
+                Apply
+              </button>
+            </form>
             <div className="mb-2 flex gap-2 border-b border-border pb-2">
               <button
                 type="button"
-                onClick={() => column.setFilterValue(uniqueValues)}
+                onClick={() => column.setFilterValue(undefined)}
                 className="text-[11px] font-medium text-primary hover:underline"
               >
                 Select all
               </button>
               <button
                 type="button"
-                onClick={() => column.setFilterValue(undefined)}
+                onClick={() => column.setFilterValue(uniqueValues.map((value) => `!${value}`))}
                 className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
               >
-                Deselect all
+                Deselect visible values
               </button>
             </div>
             <div className="max-h-48 space-y-0.5 overflow-y-auto">

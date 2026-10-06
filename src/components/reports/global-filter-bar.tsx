@@ -23,10 +23,13 @@ export function GlobalFilterBar({
 
   function applyFilters(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const params = new URLSearchParams();
+    const params = new URLSearchParams(window.location.search);
     params.set("from", selectedFrom);
     params.set("to", selectedTo);
     if (selectedProperty) params.set("property", selectedProperty);
+    else params.delete("property");
+    params.set("bookingPage", "1");
+    params.set("paymentPage", "1");
     router.push(`/?${params.toString()}`, { scroll: false });
   }
 

@@ -2,6 +2,7 @@ import { AuthScreen } from "@/components/auth/auth-screen";
 import { ReportsDashboard } from "@/components/reports/reports-dashboard";
 import { getReports, normalizeReportFilters } from "@/lib/reports/data";
 import { createClient } from "@/lib/supabase/server";
+import { getProfileAvatarUrl } from "@/lib/supabase/profile-avatar";
 import { redirect } from "next/navigation";
 
 type HomePageProps = {
@@ -32,24 +33,30 @@ export default async function Home({ searchParams }: HomePageProps) {
     );
   }
 
-  const identity = {
-    email: user.email ?? "",
-    fullName:
-      typeof user.user_metadata.full_name === "string" ? user.user_metadata.full_name : null,
-  };
-
   const filters = normalizeReportFilters(query);
   if (typeof query.from !== "string" || typeof query.to !== "string") {
     const defaultParams = new URLSearchParams({ from: filters.from, to: filters.to });
     if (filters.property) defaultParams.set("property", filters.property);
     redirect(`/?${defaultParams.toString()}`);
   }
-  const reportData = await getReports(filters);
+
+  const [avatar, reportData] = await Promise.all([
+    getProfileAvatarUrl(supabase, user),
+    getReports(filters),
+  ]);
+  const identity = {
+    email: user.email ?? "",
+    fullName:
+      typeof user.user_metadata.full_name === "string" ? user.user_metadata.full_name : null,
+    avatarUrl: avatar.url,
+  };
+
   return (
     <ReportsDashboard
       user={identity}
       bookings={reportData.bookings}
       payments={reportData.payments}
+      paymentMethods={reportData.paymentMethods}
       properties={reportData.properties}
       filters={reportData.filters}
       bookingTotal={reportData.bookingTotal}
