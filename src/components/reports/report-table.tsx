@@ -17,11 +17,12 @@ import {
   type SortingState,
 } from "@tanstack/react-table";
 import Link from "next/link";
-import { ArrowDown, ArrowDownUp, ArrowUp, Check, ChevronDown, ChevronUp, Columns3, Filter, Search, X } from "lucide-react";
-import { useState } from "react";
-import type { ReactNode } from "react";
+import { ArrowDown, ArrowDownUp, ArrowUp, Bookmark, Check, ChevronDown, ChevronUp, Columns3, Filter, Search, X } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import type { ComponentType } from "react";
 import { useRouter } from "next/navigation";
+import { createTableView, getTableView, listTableViews } from "@/app/actions/table-views";
 import { BookingRow } from "@/components/bookings/booking-row";
 import { PaymentRow } from "@/components/payments/payment-row";
 import { ReportTableRow } from "@/components/reports/report-table-row";
@@ -51,6 +52,7 @@ type ReportTableProps<TData extends object> = {
   totalRecords: number;
   pageCount: number;
   pageParam: "bookingPage" | "paymentPage";
+  tableName: "BookingsReport" | "PaymentsReport";
   paginationParams: Record<string, string>;
   activeColumnFilters: Record<string, string[]>;
   onRowClick?: (row: TData) => void;
@@ -69,6 +71,7 @@ export function ReportTable<TData extends object>({
   totalRecords,
   pageCount,
   pageParam,
+  tableName,
   paginationParams,
   activeColumnFilters,
   onRowClick,
@@ -128,6 +131,13 @@ export function ReportTable<TData extends object>({
           </div>
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <SavedViewsMenu
+            tableName={tableName}
+            columnVisibility={columnVisibility}
+            columnOrder={columnOrder}
+            setColumnVisibility={setColumnVisibility}
+            setColumnOrder={setColumnOrder}
+          />
           <ColumnVisibilityMenu
             table={table}
             columnOrder={columnOrder}
@@ -263,6 +273,279 @@ export function ReportTable<TData extends object>({
         </div>
       )}
     </section>
+  );
+}
+
+type SavedView = {
+  id: string;
+  name: string;
+  tableName: string;
+  columnVisibility: Record<string, boolean>;
+  columnOrder: string[];
+};
+
+function SavedViewsMenu({
+  tableName,
+  columnVisibility,
+  columnOrder,
+  setColumnVisibility,
+  setColumnOrder,
+}: {
+  tableName: "BookingsReport" | "PaymentsReport";
+  columnVisibility: ColumnVisibilityState;
+  columnOrder: ColumnOrderState;
+  setColumnVisibility: Dispatch<SetStateAction<ColumnVisibilityState>>;
+  setColumnOrder: Dispatch<SetStateAction<ColumnOrderState>>;
+}) {
+  const [views, setViews] = useState<SavedView[]>([]);
+  const [activeViewId, setActiveViewId] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [viewName, setViewName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [noticeIsError, setNoticeIsError] = useState(false);
+  const storageKey = `active_view_${tableName}`;
+
+  const notify = useCallback((message: string, isError = false) => {
+    setNotice(message);
+    setNoticeIsError(isError);
+    window.setTimeout(() => {
+      setNotice((current) => (current === message ? "" : current));
+    }, 4000);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function restoreActiveView() {
+      setLoading(true);
+      try {
+        const result = await listTableViews(tableName);
+        if (!result.ok) throw new Error(result.error);
+        if (cancelled) return;
+        setViews(result.views);
+
+        let savedId: string | null;
+        try {
+          savedId = window.localStorage.getItem(storageKey);
+        } catch {
+          notify("Saved views are available, but browser storage could not be accessed.", true);
+          return;
+        }
+        if (!savedId) return;
+        if (!result.views.some((view) => view.id === savedId)) {
+          window.localStorage.removeItem(storageKey);
+          return;
+        }
+
+        const activeResult = await getTableView(savedId, tableName);
+        if (cancelled) return;
+        if (!activeResult.ok) {
+          window.localStorage.removeItem(storageKey);
+          notify(activeResult.error, true);
+          return;
+        }
+        setColumnVisibility(activeResult.view.columnVisibility);
+        setColumnOrder(activeResult.view.columnOrder);
+        setActiveViewId(activeResult.view.id);
+      } catch (error) {
+        if (!cancelled) {
+          notify(error instanceof Error ? error.message : "Could not load saved views.", true);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void restoreActiveView();
+    return () => {
+      cancelled = true;
+    };
+  }, [notify, setColumnOrder, setColumnVisibility, storageKey, tableName]);
+
+  async function applyView(id: string) {
+    try {
+      const result = await getTableView(id, tableName);
+      if (!result.ok) throw new Error(result.error);
+      setColumnVisibility(result.view.columnVisibility);
+      setColumnOrder(result.view.columnOrder);
+      window.localStorage.setItem(storageKey, result.view.id);
+      setActiveViewId(result.view.id);
+      setMenuOpen(false);
+      notify(`Applied "${result.view.name}".`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not apply this saved view.", true);
+    }
+  }
+
+  function applyDefaultView() {
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      notify("Could not reset the active view in browser storage.", true);
+      return;
+    }
+    setColumnVisibility({});
+    setColumnOrder([]);
+    setActiveViewId(null);
+    setMenuOpen(false);
+    notify("Default view applied.");
+  }
+
+  async function saveView(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      const result = await createTableView({
+        name: viewName,
+        tableName,
+        columnVisibility,
+        columnOrder,
+      });
+      if (!result.ok) throw new Error(result.error);
+      const savedView: SavedView = {
+        ...result.view,
+        columnVisibility,
+        columnOrder,
+      };
+      setViews((current) => [...current, savedView].sort((left, right) => left.name.localeCompare(right.name)));
+      window.localStorage.setItem(storageKey, savedView.id);
+      setActiveViewId(savedView.id);
+      setViewName("");
+      setDialogOpen(false);
+      notify(`Saved "${savedView.name}".`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Could not save this view.", true);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="relative">
+        <button
+          type="button"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-card px-2.5 text-xs font-medium text-card-foreground hover:bg-muted"
+        >
+          <Bookmark className="h-3.5 w-3.5" />
+          Saved Views
+          <ChevronDown className="h-3 w-3 text-muted-foreground" />
+        </button>
+        {menuOpen && (
+          <>
+            <button
+              type="button"
+              aria-label="Close saved views menu"
+              className="fixed inset-0 z-30 cursor-default"
+              onClick={() => setMenuOpen(false)}
+            />
+            <div className="absolute right-0 top-10 z-40 w-64 rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-xl">
+              <p className="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {tableName === "BookingsReport" ? "Bookings" : "Payments"} views
+              </p>
+              <button
+                type="button"
+                onClick={applyDefaultView}
+                className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs hover:bg-muted"
+              >
+                <span>Default View</span>
+                {!activeViewId && <Check className="h-3.5 w-3.5 text-primary" />}
+              </button>
+              {loading ? (
+                <p className="px-2 py-2 text-xs text-muted-foreground">Loading saved views...</p>
+              ) : views.length ? (
+                views.map((view) => (
+                  <button
+                    type="button"
+                    key={view.id}
+                    onClick={() => void applyView(view.id)}
+                    className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left text-xs hover:bg-muted"
+                  >
+                    <span className="truncate">{view.name}</span>
+                    {activeViewId === view.id && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                  </button>
+                ))
+              ) : (
+                <p className="px-2 py-2 text-xs text-muted-foreground">No saved views yet.</p>
+              )}
+              <div className="my-1 border-t border-border" />
+              <button
+                type="button"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setDialogOpen(true);
+                }}
+                className="w-full rounded-md px-2 py-2 text-left text-xs font-medium text-primary hover:bg-primary/10"
+              >
+                Save Current View As...
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+      {dialogOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4">
+          <form
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`save-view-title-${tableName}`}
+            onSubmit={(event) => void saveView(event)}
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-2xl"
+          >
+            <h2 id={`save-view-title-${tableName}`} className="text-base font-semibold">
+              Save current view
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Name this {tableName === "BookingsReport" ? "bookings" : "payments"} table layout.
+            </p>
+            <label className="mt-4 grid gap-1.5 text-sm font-medium">
+              View name
+              <input
+                autoFocus
+                required
+                maxLength={80}
+                value={viewName}
+                onChange={(event) => setViewName(event.target.value)}
+                placeholder="e.g. My finance view"
+                className="h-10 rounded-lg border border-input bg-background px-3 text-sm font-normal text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </label>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setDialogOpen(false)}
+                disabled={saving}
+                className="h-9 rounded-lg border border-border px-3 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={saving || !viewName.trim()}
+                className="h-9 rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              >
+                {saving ? "Saving..." : "Save view"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {notice && (
+        <div
+          role={noticeIsError ? "alert" : "status"}
+          className={`fixed bottom-5 right-5 z-[110] max-w-sm rounded-xl border bg-card px-4 py-3 text-sm text-card-foreground shadow-xl ${
+            noticeIsError ? "border-danger/40" : "border-success/40"
+          }`}
+        >
+          {notice}
+        </div>
+      )}
+    </>
   );
 }
 

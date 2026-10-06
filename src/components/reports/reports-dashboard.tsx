@@ -359,6 +359,7 @@ export function ReportsDashboard({
                 totalRecords={bookingTotal}
                 pageCount={bookingPageCount}
                 pageParam="bookingPage"
+                tableName="BookingsReport"
                 paginationParams={paginationParams}
                 activeColumnFilters={filters.bookingColumnFilters}
               />
@@ -384,6 +385,7 @@ export function ReportsDashboard({
                 totalRecords={paymentTotal}
                 pageCount={paymentPageCount}
                 pageParam="paymentPage"
+                tableName="PaymentsReport"
                 paginationParams={paginationParams}
                 activeColumnFilters={filters.paymentColumnFilters}
               />

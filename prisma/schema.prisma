@@ -55,8 +55,26 @@ model User {
   deleted_at     DateTime? @db.Timestamptz(6)
 
   audit_events AuditLog[] @relation("AuditActor")
+  table_views  TableView[]
 
   @@map("users")
+}
+
+model TableView {
+  id                String   @id @default(uuid()) @db.Uuid
+  name              String   @db.VarChar(80)
+  table_name        String   @db.VarChar(80)
+  column_visibility Json     @db.JsonB
+  column_order      Json     @db.JsonB
+  user_id           String   @db.Uuid
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime @updatedAt @db.Timestamptz(6)
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, table_name, name])
+  @@index([user_id, table_name, created_at])
+  @@map("table_views")
 }
 
 model ImportBatch {
