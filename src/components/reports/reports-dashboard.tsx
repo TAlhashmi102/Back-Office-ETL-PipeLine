@@ -23,18 +23,19 @@ import { SummaryCard } from "@/components/reports/summary-card";
 import { ReportTable, reportTableFeatures } from "@/components/reports/report-table";
 import { GlobalFilterBar } from "@/components/reports/global-filter-bar";
 import { AppSidebar } from "@/components/layout/app-sidebar";
+import { BookingWorkspace, requestBookingCardOpen } from "@/components/bookings/booking-workspace";
 import {
   BOOKING_HEADERS,
   PAYMENT_HEADERS,
-  PAYMENT_METHOD_COLUMNS,
 } from "@/lib/reports/aggregation";
 import type { BookingReportRow, PaymentReportRow } from "@/lib/reports/aggregation";
 import type { ReportFilters } from "@/lib/reports/data";
 
 type ReportsDashboardProps = {
-  user: { email: string; fullName: string | null };
+  user: { email: string; fullName: string | null; avatarUrl: string | null };
   bookings: BookingReportRow[];
   payments: PaymentReportRow[];
+  paymentMethods: string[];
   properties: string[];
   filters: ReportFilters;
   bookingTotal: number;
@@ -59,7 +60,16 @@ function multiSelectFilter<TFeatures extends TableFeatures, TData extends RowDat
   filterValue: unknown,
 ) {
   if (!Array.isArray(filterValue)) return true;
-  return filterValue.includes(String(row.getValue(columnId) ?? ""));
+  const value = String(row.getValue(columnId) ?? "");
+  const excludedValues = filterValue
+    .filter((filter): filter is string => typeof filter === "string" && filter.startsWith("!"))
+    .map((filter) => filter.slice(1));
+  if (excludedValues.length) return !excludedValues.includes(value);
+  return filterValue.some((filter) =>
+    typeof filter === "string" && filter.startsWith("~")
+      ? value.toLocaleLowerCase().includes(filter.slice(1).toLocaleLowerCase())
+      : filter === value,
+  );
 }
 
 function decimalSort<TFeatures extends TableFeatures, TData extends RowData>(
@@ -124,51 +134,53 @@ const bookingSourceColumns = BOOKING_HEADERS.flatMap((header) => {
   ];
 });
 
-const bookingColumns = [
-  ...bookingSourceColumns,
-  bookingColumn.accessor((row) => row.internalCompany, {
-    id: "internal-company",
-    header: "Crown BS Company",
-    filterFn: multiSelectFilter,
-  }),
-  ...PAYMENT_METHOD_COLUMNS.map((method) =>
-    bookingColumn.accessor((row) => row.paymentTotals[method], {
-      id: `payment-${method}`,
-      header: method,
+function buildBookingColumns(paymentMethods: string[]) {
+  return [
+    ...bookingSourceColumns,
+    bookingColumn.accessor((row) => row.internalCompany, {
+      id: "internal-company",
+      header: "Crown BS Company",
+      filterFn: multiSelectFilter,
+    }),
+    ...paymentMethods.map((method) =>
+      bookingColumn.accessor((row) => row.paymentTotals[method] ?? "0.00", {
+        id: `payment-method:${encodeURIComponent(method)}`,
+        header: method,
+        filterFn: multiSelectFilter,
+        sortFn: decimalSort,
+        cell: (info) => displayMoney(info.getValue(), info.row.original.source.Currency),
+      }),
+    ),
+    bookingColumn.accessor((row) => row.transactionTotal, {
+      id: "transaction-total",
+      header: "Payment Total",
       filterFn: multiSelectFilter,
       sortFn: decimalSort,
-      cell: (info) => displayMoney(info.getValue(), info.row.original.source.Currency),
+      cell: (info) => (
+        <span className="font-semibold text-success">
+          {displayMoney(info.getValue(), info.row.original.source.Currency)}
+        </span>
+      ),
     }),
-  ),
-  bookingColumn.accessor((row) => row.transactionTotal, {
-    id: "transaction-total",
-    header: "Payments Total",
-    filterFn: multiSelectFilter,
-    sortFn: decimalSort,
-    cell: (info) => (
-      <span className="font-semibold text-success">
-        {displayMoney(info.getValue(), info.row.original.source.Currency)}
-      </span>
-    ),
-  }),
-  bookingColumn.accessor((row) => row.dueAmount, {
-    id: "due-amount",
-    header: "Due Amount",
-    filterFn: multiSelectFilter,
-    sortFn: decimalSort,
-    cell: (info) => (
-      <strong className={new Decimal(info.getValue()).isZero() ? "text-success" : "text-warning"}>
-        {displayMoney(info.getValue(), info.row.original.source.Currency)}
-      </strong>
-    ),
-  }),
-  bookingColumn.accessor((row) => row.balanceStatus, {
-    id: "balance-status",
-    header: "Payment Status",
-    filterFn: multiSelectFilter,
-    cell: (info) => <StatusBadge status={info.getValue()} />,
-  }),
-];
+    bookingColumn.accessor((row) => row.dueAmount, {
+      id: "due-amount",
+      header: "Due Amount",
+      filterFn: multiSelectFilter,
+      sortFn: decimalSort,
+      cell: (info) => (
+        <strong className={new Decimal(info.getValue()).isZero() ? "text-success" : "text-warning"}>
+          {displayMoney(info.getValue(), info.row.original.source.Currency)}
+        </strong>
+      ),
+    }),
+    bookingColumn.accessor((row) => row.balanceStatus, {
+      id: "balance-status",
+      header: "Payment Status",
+      filterFn: multiSelectFilter,
+      cell: (info) => <StatusBadge status={info.getValue()} />,
+    }),
+  ];
+}
 
 const paymentColumns = PAYMENT_HEADERS.map((header) =>
   paymentColumn.accessor((row) => row.source[header] ?? "", {
@@ -188,6 +200,7 @@ export function ReportsDashboard({
   user,
   bookings,
   payments,
+  paymentMethods,
   properties,
   filters,
   bookingTotal,
@@ -204,7 +217,14 @@ export function ReportsDashboard({
     ...(filters.property ? { property: filters.property } : {}),
     bookingPage: String(filters.bookingPage),
     paymentPage: String(filters.paymentPage),
+    ...Object.fromEntries(
+      Object.entries(filters.bookingColumnFilters).map(([id, values]) => [`bf.${id}`, JSON.stringify(values)]),
+    ),
+    ...Object.fromEntries(
+      Object.entries(filters.paymentColumnFilters).map(([id, values]) => [`pf.${id}`, JSON.stringify(values)]),
+    ),
   };
+  const bookingColumns = buildBookingColumns(paymentMethods);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -228,13 +248,23 @@ export function ReportsDashboard({
             </div>
 
             <div className="flex items-center gap-2 sm:gap-3">
+              <BookingWorkspace />
               <div className="hidden h-8 w-px bg-border sm:block" />
               <div className="hidden text-right sm:block">
                 <p className="max-w-40 truncate text-xs font-semibold">{user.fullName || user.email}</p>
                 <p className="mt-0.5 text-[10px] text-muted-foreground">Team member</p>
               </div>
-              <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
-                {(user.fullName || user.email).slice(0, 1).toUpperCase()}
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/10 text-xs font-semibold text-primary ring-1 ring-border">
+                {user.avatarUrl ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={user.avatarUrl}
+                    alt={`${user.fullName || user.email} profile picture`}
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  (user.fullName || user.email).slice(0, 1).toUpperCase()
+                )}
               </div>
             </div>
           </header>
@@ -275,14 +305,14 @@ export function ReportsDashboard({
               <SummaryCard
                 label="Payments received"
                 value={currency(summary.paid)}
-                change="Authoritative Paid Amount from bookings"
+                change="Sum of linked payment transactions"
                 icon={<CreditCard className="h-[18px] w-[18px]" />}
                 accent="blue"
               />
               <SummaryCard
                 label="Outstanding balance"
                 value={currency(summary.outstanding)}
-                change="Revenue less booking Paid Amount"
+                change="Revenue less linked payments"
                 icon={<ArrowUpRight className="h-[18px] w-[18px]" />}
                 accent="amber"
               />
@@ -299,7 +329,7 @@ export function ReportsDashboard({
               <div>
                 <h2 className="text-lg font-semibold tracking-[-0.025em]">Reports</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Sort and filter each loaded page; date, hotel, and pagination are applied on the server.
+                  Column filters search the full server-side result set; date, hotel, and pagination are server-side.
                 </p>
               </div>
               <div className="hidden items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1.5 text-[11px] font-medium text-primary sm:flex">
@@ -310,34 +340,52 @@ export function ReportsDashboard({
 
             <div className="space-y-5">
               <ReportTable
-                key={`bookings-${filters.from}-${filters.to}-${filters.property}-${filters.bookingPage}`}
+                key={`bookings-${filters.from}-${filters.to}-${filters.property}-${filters.bookingPage}-${JSON.stringify(filters.bookingColumnFilters)}`}
                 title="Bookings report"
-                description="Bookings CSV Paid Amount determines status and due; payment-log totals are informational pivots"
+                description="Payment methods, transaction totals, due, and payment status are aggregated from linked Payments"
                 icon={<FileSpreadsheet className="h-[18px] w-[18px]" />}
                 rows={bookings}
                 columns={bookingColumns}
                 pageSize={20}
                 rowKind="booking"
+                getRowBookingReference={(row) => row.source["Booking Reference"]?.trim() || null}
+                onRowClick={(row) => {
+                  const bookingReference = row.source["Booking Reference"]?.trim();
+                  if (bookingReference) {
+                    requestBookingCardOpen({ bookingId: row.id, bookingReference });
+                  }
+                }}
                 currentPage={filters.bookingPage}
                 totalRecords={bookingTotal}
                 pageCount={bookingPageCount}
                 pageParam="bookingPage"
                 paginationParams={paginationParams}
+                activeColumnFilters={filters.bookingColumnFilters}
               />
               <ReportTable
-                key={`payments-${filters.from}-${filters.to}-${filters.property}-${filters.paymentPage}`}
+                key={`payments-${filters.from}-${filters.to}-${filters.property}-${filters.paymentPage}-${JSON.stringify(filters.paymentColumnFilters)}`}
                 title="Payments report"
                 description="Transaction-level payment records and source amounts"
                 icon={<CreditCard className="h-[18px] w-[18px]" />}
                 rows={payments}
                 columns={paymentColumns}
                 rowKind="payment"
+                getRowBookingReference={(row) =>
+                  row.bookingId ? row.source["Booking Reference"]?.trim() || null : null
+                }
+                onRowClick={(row) => {
+                  const bookingReference = row.source["Booking Reference"]?.trim();
+                  if (row.bookingId && bookingReference) {
+                    requestBookingCardOpen({ bookingId: row.bookingId, bookingReference });
+                  }
+                }}
                 pageSize={20}
                 currentPage={filters.paymentPage}
                 totalRecords={paymentTotal}
                 pageCount={paymentPageCount}
                 pageParam="paymentPage"
                 paginationParams={paginationParams}
+                activeColumnFilters={filters.paymentColumnFilters}
               />
             </div>
 

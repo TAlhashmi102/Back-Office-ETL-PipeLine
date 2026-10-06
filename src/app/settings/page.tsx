@@ -5,6 +5,7 @@ import { DriveSyncButton } from "@/components/reports/drive-sync-button";
 import { ProfileSettings } from "@/components/settings/profile-settings";
 import { ThemeSettings } from "@/components/theme/theme-settings";
 import { createClient } from "@/lib/supabase/server";
+import { getProfileAvatarUrl } from "@/lib/supabase/profile-avatar";
 import { redirect } from "next/navigation";
 
 export default async function SettingsPage() {
@@ -23,25 +24,7 @@ export default async function SettingsPage() {
     typeof user.user_metadata.phone === "string" ? user.user_metadata.phone : "";
   const address =
     typeof user.user_metadata.address === "string" ? user.user_metadata.address : "";
-  const avatarPath =
-    typeof user.user_metadata.avatar_path === "string" ? user.user_metadata.avatar_path : null;
-  let avatarUrl: string | null = null;
-  let avatarError: string | undefined;
-
-  if (avatarPath) {
-    if (!avatarPath.startsWith(`${user.id}/`)) {
-      avatarError = "The saved profile picture path is invalid. Select a new picture and save your profile.";
-    } else {
-      const { data: signedAvatar, error: signedAvatarError } = await supabase.storage
-        .from("profile-avatars")
-        .createSignedUrl(avatarPath, 60 * 60);
-      if (signedAvatarError) {
-        avatarError = `Could not load the saved profile picture: ${signedAvatarError.message}`;
-      } else {
-        avatarUrl = signedAvatar.signedUrl;
-      }
-    }
-  }
+  const avatar = await getProfileAvatarUrl(supabase, user);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -95,8 +78,8 @@ export default async function SettingsPage() {
               fullName={fullName ?? ""}
               phone={phone}
               address={address}
-              avatarUrl={avatarUrl}
-              avatarError={avatarError}
+              avatarUrl={avatar.url}
+              avatarError={avatar.error}
             />
             <div className="mt-5">
               <ThemeSettings />

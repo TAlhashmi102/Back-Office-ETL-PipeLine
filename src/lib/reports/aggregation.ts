@@ -83,33 +83,33 @@ export const PAYMENT_HEADERS = [
   "Direct1",
 ] as const;
 
-export const PAYMENT_METHOD_COLUMNS = [
-  "Cash",
-  "Card",
-  "Bank Transfer",
-  "On Account",
-  "Prepaid",
-  "External Card",
-  "PayPal",
-] as const;
-
-export type PaymentMethodColumn = (typeof PAYMENT_METHOD_COLUMNS)[number];
 export type SourceRecord = Record<string, string>;
 
 export type BookingSource = {
+  id?: string;
   source: SourceRecord;
+  sourceSystem?: string;
   internalCompany?: string | null;
+  totalAmount?: string;
+  paidAmount?: string;
+  guestOverrides?: Record<string, string>;
 };
 
 export type PaymentSource = {
+  id?: string;
+  bookingId?: string | null;
   source: SourceRecord;
+  sourceSystem?: string;
+  bookingReference?: string | null;
+  paymentMethod?: string | null;
+  amount?: string;
 };
 
 export type BookingReportRow = {
   id: string;
   source: SourceRecord;
   internalCompany: string;
-  paymentTotals: Record<PaymentMethodColumn, string>;
+  paymentTotals: Record<string, string>;
   transactionTotal: string;
   dueAmount: string;
   balanceStatus: "Paid" | "Partially paid" | "Unpaid";
@@ -117,6 +117,7 @@ export type BookingReportRow = {
 
 export type PaymentReportRow = {
   id: string;
+  bookingId: string | null;
   source: SourceRecord;
 };
 
@@ -169,28 +170,6 @@ export function cleanBookingRecord(record: SourceRecord) {
   };
 }
 
-const paymentMethodAliases: Record<string, PaymentMethodColumn> = {
-  cash: "Cash",
-  cash1: "Cash",
-  card: "Card",
-  card1: "Card",
-  "credit card": "Card",
-  "debit card": "Card",
-  "bank transfer": "Bank Transfer",
-  transfer: "Bank Transfer",
-  onaccount: "On Account",
-  "on account": "On Account",
-  prepaid: "Prepaid",
-  otaprepaid1: "Prepaid",
-  externalcard: "External Card",
-  "external card": "External Card",
-  paypal: "PayPal",
-};
-
-export function normalizePaymentMethod(value: string): PaymentMethodColumn | null {
-  return paymentMethodAliases[value.trim().toLocaleLowerCase()] ?? null;
-}
-
 export function buildBookingReportRows(
   bookings: BookingSource[],
   payments: PaymentSource[],
@@ -198,52 +177,60 @@ export function buildBookingReportRows(
   const paymentsByBooking = new Map<string, PaymentSource[]>();
 
   for (const payment of payments) {
-    const bookingReference = payment.source.BookingReference?.trim();
+    const bookingReference = (payment.bookingReference ?? payment.source.BookingReference)?.trim();
     if (!bookingReference) continue;
-    const existing = paymentsByBooking.get(bookingReference) ?? [];
+    const key = `${payment.sourceSystem ?? ""}\u0000${bookingReference}`;
+    const existing = paymentsByBooking.get(key) ?? [];
     existing.push(payment);
-    paymentsByBooking.set(bookingReference, existing);
+    paymentsByBooking.set(key, existing);
   }
 
-  return bookings.map(({ source: originalSource, internalCompany }) => {
+  return bookings.map(({ id, source: originalSource, sourceSystem, internalCompany, totalAmount, paidAmount, guestOverrides }) => {
     const cleaned = cleanBookingRecord(originalSource);
     if (cleaned.dropped) return null;
     const source = cleaned.source;
-    const paymentTotals = Object.fromEntries(
-      PAYMENT_METHOD_COLUMNS.map((method) => [method, new Decimal(0)]),
-    ) as Record<PaymentMethodColumn, Decimal>;
+    const revenue = totalAmount
+      ? parseDecimalAmount(totalAmount, "Total Revenue")
+      : new Decimal(cleaned.totalRevenue);
+    const paid = paidAmount
+      ? parseDecimalAmount(paidAmount, "Paid Amount")
+      : parseDecimalAmount(source["Paid Amount"] ?? "", "Paid Amount");
+    for (const [key, value] of Object.entries(guestOverrides ?? {})) {
+      if (key in source) source[key] = value;
+    }
+    source["Total Revenue"] = revenue.toFixed(2);
+    source["Paid Amount"] = paid.toFixed(2);
+    const paymentTotals = new Map<string, Decimal>();
 
-    for (const { source: payment } of paymentsByBooking.get(source["Booking Reference"]?.trim() ?? "") ?? []) {
-      const method = normalizePaymentMethod(payment.PaymentMethod ?? "");
-      if (method) {
-        paymentTotals[method] = paymentTotals[method].plus(
-          parseDecimalAmount(payment.Direct1 ?? "", "Direct1"),
-        );
-      }
+    const bookingReference = source["Booking Reference"]?.trim() ?? "";
+    const bookingPayments =
+      paymentsByBooking.get(`${sourceSystem ?? ""}\u0000${bookingReference}`) ??
+      paymentsByBooking.get(`\u0000${bookingReference}`) ??
+      [];
+    for (const payment of bookingPayments) {
+      const method = (payment.paymentMethod ?? payment.source.PaymentMethod ?? "").trim() || "Unspecified";
+      const amount = parseDecimalAmount(payment.amount ?? payment.source.Direct1 ?? "", "Direct1");
+      paymentTotals.set(method, (paymentTotals.get(method) ?? new Decimal(0)).plus(amount));
     }
 
-    const transactionTotal = PAYMENT_METHOD_COLUMNS.reduce(
-      (sum, method) => sum.plus(paymentTotals[method]),
+    const transactionTotal = [...paymentTotals.values()].reduce(
+      (sum, amount) => sum.plus(amount),
       new Decimal(0),
     );
-    const bookingPaidAmount = parseDecimalAmount(source["Paid Amount"] ?? "", "Paid Amount");
-    const dueAmount = Decimal.max(
-      new Decimal(cleaned.totalRevenue).minus(bookingPaidAmount),
-      0,
-    );
+    const dueAmount = Decimal.max(revenue.minus(transactionTotal), 0);
 
     return {
-      id: source["Booking Reference"] ?? "",
+      id: id ?? source["Booking Reference"] ?? "",
       source,
       internalCompany: internalCompany ?? "",
       paymentTotals: Object.fromEntries(
-        PAYMENT_METHOD_COLUMNS.map((method) => [method, paymentTotals[method].toFixed(2)]),
-      ) as Record<PaymentMethodColumn, string>,
+        [...paymentTotals.entries()].map(([method, amount]) => [method, amount.toFixed(2)]),
+      ),
       transactionTotal: transactionTotal.toFixed(2),
       dueAmount: dueAmount.toFixed(2),
       balanceStatus: dueAmount.isZero()
         ? "Paid"
-        : bookingPaidAmount.isZero()
+        : transactionTotal.isZero()
           ? "Unpaid"
           : "Partially paid",
     };
@@ -251,8 +238,9 @@ export function buildBookingReportRows(
 }
 
 export function buildPaymentReportRows(payments: PaymentSource[]): PaymentReportRow[] {
-  return payments.map(({ source }) => ({
-    id: source.PaymentID || `${source.BookingReference ?? ""}-${source.ReceivedDateTime ?? ""}`,
+  return payments.map(({ id, bookingId, source }) => ({
+    id: id ?? source.PaymentID ?? `${source.BookingReference ?? ""}-${source.ReceivedDateTime ?? ""}`,
+    bookingId: bookingId ?? null,
     source,
   }));
 }
