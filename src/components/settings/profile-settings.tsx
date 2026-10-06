@@ -1,41 +1,149 @@
 "use client";
 
-import { Check, Upload, UserRound } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ChangeEvent } from "react";
+import { Check, LoaderCircle, Upload, UserRound } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { createClient } from "@/lib/supabase/client";
 
 type ProfileSettingsProps = {
+  email: string;
   fullName: string;
   phone: string;
   address: string;
+  avatarUrl: string | null;
+  avatarError?: string;
 };
 
-export function ProfileSettings({ fullName, phone, address }: ProfileSettingsProps) {
+const maxAvatarSize = 5 * 1024 * 1024;
+const supportedAvatarTypes = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const avatarBucket = "profile-avatars";
+
+export function ProfileSettings({
+  email,
+  fullName,
+  phone,
+  address,
+  avatarUrl,
+  avatarError,
+}: ProfileSettingsProps) {
+  const router = useRouter();
   const [name, setName] = useState(fullName);
   const [phoneNumber, setPhoneNumber] = useState(phone);
   const [userAddress, setUserAddress] = useState(address);
-  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
-  const [message, setMessage] = useState("");
+  const [selectedAvatar, setSelectedAvatar] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(avatarUrl);
+  const [message, setMessage] = useState(avatarError ?? "");
+  const [isError, setIsError] = useState(Boolean(avatarError));
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
-    if (!avatarPreview) return;
+    if (!avatarPreview?.startsWith("blob:")) return;
     return () => URL.revokeObjectURL(avatarPreview);
   }, [avatarPreview]);
 
   function handleImageSelect(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setMessage("Choose an image file to preview your profile picture.");
+
+    if (!supportedAvatarTypes.has(file.type)) {
+      setMessage("Choose a JPEG, PNG, WebP, or GIF image.");
+      setIsError(true);
       event.target.value = "";
       return;
     }
-    setMessage("");
+    if (file.size > maxAvatarSize) {
+      setMessage("Profile pictures must be 5 MB or smaller.");
+      setIsError(true);
+      event.target.value = "";
+      return;
+    }
+
+    setSelectedAvatar(file);
     setAvatarPreview(URL.createObjectURL(file));
+    setMessage("");
+    setIsError(false);
   }
 
-  function handleSave(event: FormEvent<HTMLFormElement>) {
+  async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setMessage("Profile details saved for this session. Connect a profile storage bucket to persist them.");
+    setIsSaving(true);
+    setMessage("");
+    setIsError(false);
+
+    const supabase = createClient();
+    let uploadedAvatarPath: string | null = null;
+
+    try {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError) throw new Error(`Could not verify your account: ${authError.message}`);
+      if (!authData.user) throw new Error("Your session has expired. Sign in again to save your profile.");
+
+      const currentAvatarPath =
+        typeof authData.user.user_metadata.avatar_path === "string"
+          ? authData.user.user_metadata.avatar_path
+          : null;
+      let nextAvatarPath = currentAvatarPath;
+      const previousAvatarPath = currentAvatarPath;
+
+      if (selectedAvatar) {
+        const extension = selectedAvatar.type.split("/")[1].replace("jpeg", "jpg");
+        uploadedAvatarPath = `${authData.user.id}/${crypto.randomUUID()}.${extension}`;
+        const { error: uploadError } = await supabase.storage
+          .from(avatarBucket)
+          .upload(uploadedAvatarPath, selectedAvatar, {
+            cacheControl: "3600",
+            contentType: selectedAvatar.type,
+            upsert: true,
+          });
+        if (uploadError) {
+          throw new Error(`Could not upload your profile picture: ${uploadError.message}`);
+        }
+        nextAvatarPath = uploadedAvatarPath;
+      }
+
+      const { error: updateError } = await supabase.auth.updateUser({
+        data: {
+          full_name: name.trim(),
+          phone: phoneNumber.trim(),
+          address: userAddress.trim(),
+          avatar_path: nextAvatarPath,
+        },
+      });
+
+      if (updateError) {
+        if (uploadedAvatarPath) {
+          const { error: cleanupError } = await supabase.storage
+            .from(avatarBucket)
+            .remove([uploadedAvatarPath]);
+          if (cleanupError) {
+            throw new Error(
+              `Profile details were not saved (${updateError.message}); uploaded image cleanup also failed (${cleanupError.message}).`,
+            );
+          }
+        }
+        throw new Error(`Could not save your profile: ${updateError.message}`);
+      }
+
+      let cleanupWarning = "";
+      if (selectedAvatar && previousAvatarPath && previousAvatarPath !== uploadedAvatarPath) {
+        const { error: cleanupError } = await supabase.storage
+          .from(avatarBucket)
+          .remove([previousAvatarPath]);
+        if (cleanupError) {
+          cleanupWarning = `Profile saved, but the previous picture could not be removed: ${cleanupError.message}`;
+        }
+      }
+
+      setMessage(cleanupWarning || "Your profile has been saved.");
+      setIsError(Boolean(cleanupWarning));
+      setSelectedAvatar(null);
+      router.refresh();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save your profile.");
+      setIsError(true);
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   const initials =
@@ -60,14 +168,16 @@ export function ProfileSettings({ fullName, phone, address }: ProfileSettingsPro
           <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full bg-primary/10 text-xl font-semibold text-primary ring-1 ring-border">
             {avatarPreview ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={avatarPreview} alt="Selected profile picture preview" className="h-full w-full object-cover" />
+              <img src={avatarPreview} alt="Profile picture" className="h-full w-full object-cover" />
             ) : (
               initials
             )}
           </div>
           <div className="min-w-0">
             <p className="text-sm font-medium">Profile picture</p>
-            <p className="mt-1 text-xs text-muted-foreground">Choose an image to preview it here.</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              JPEG, PNG, WebP, or GIF; up to 5 MB.
+            </p>
             <label className="mt-3 inline-flex h-9 cursor-pointer items-center gap-2 rounded-lg border border-border bg-background px-3 text-xs font-medium text-foreground transition hover:bg-muted">
               <Upload className="h-3.5 w-3.5" />
               Select image
@@ -83,6 +193,15 @@ export function ProfileSettings({ fullName, phone, address }: ProfileSettingsPro
         </div>
 
         <div className="grid gap-4 sm:grid-cols-2">
+          <label className="grid gap-1.5 text-sm font-medium sm:col-span-2">
+            Email
+            <input
+              type="email"
+              value={email}
+              readOnly
+              className="h-10 rounded-lg border border-input bg-muted px-3 text-sm font-normal text-muted-foreground"
+            />
+          </label>
           <label className="grid gap-1.5 text-sm font-medium">
             Full name
             <input
@@ -91,6 +210,7 @@ export function ProfileSettings({ fullName, phone, address }: ProfileSettingsPro
               onChange={(event) => setName(event.target.value)}
               className="h-10 rounded-lg border border-input bg-background px-3 text-sm font-normal text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               placeholder="Your full name"
+              maxLength={200}
             />
           </label>
           <label className="grid gap-1.5 text-sm font-medium">
@@ -102,6 +222,7 @@ export function ProfileSettings({ fullName, phone, address }: ProfileSettingsPro
               onChange={(event) => setPhoneNumber(event.target.value)}
               className="h-10 rounded-lg border border-input bg-background px-3 text-sm font-normal text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               placeholder="+44 0000 000000"
+              maxLength={40}
             />
           </label>
           <label className="grid gap-1.5 text-sm font-medium sm:col-span-2">
@@ -113,26 +234,32 @@ export function ProfileSettings({ fullName, phone, address }: ProfileSettingsPro
               rows={3}
               className="resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm font-normal text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
               placeholder="Street, city, postal code"
+              maxLength={1000}
             />
           </label>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3">
           {message ? (
-            <p role="status" className="inline-flex items-center gap-1.5 text-xs text-success">
-              <Check className="h-3.5 w-3.5" />
+            <p
+              role={isError ? "alert" : "status"}
+              className={`inline-flex items-center gap-1.5 text-xs ${isError ? "text-danger" : "text-success"}`}
+            >
+              {isError ? null : <Check className="h-3.5 w-3.5" />}
               {message}
             </p>
           ) : (
             <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <UserRound className="h-3.5 w-3.5" />
-              Profile changes are currently saved in this session only.
+              Profile changes are saved to your account.
             </p>
           )}
           <button
             type="submit"
-            className="h-10 rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:opacity-90"
+            disabled={isSaving}
+            className="inline-flex h-10 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Save profile
+            {isSaving && <LoaderCircle className="h-4 w-4 animate-spin" />}
+            {isSaving ? "Saving..." : "Save profile"}
           </button>
         </div>
       </form>
